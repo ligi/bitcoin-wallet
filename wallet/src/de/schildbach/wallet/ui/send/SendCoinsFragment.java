@@ -25,7 +25,6 @@ import javax.annotation.Nullable;
 
 import org.bitcoin.protocols.payments.Protos.Payment;
 import org.bitcoinj.core.Address;
-import org.bitcoinj.core.AddressFormatException;
 import org.bitcoinj.core.Coin;
 import org.bitcoinj.core.InsufficientMoneyException;
 import org.bitcoinj.core.Sha256Hash;
@@ -40,11 +39,20 @@ import org.bitcoinj.core.Wallet.CouldNotAdjustDownwards;
 import org.bitcoinj.core.Wallet.DustySendRequested;
 import org.bitcoinj.core.Wallet.SendRequest;
 import org.bitcoinj.protocols.payments.PaymentProtocol;
+import org.bitcoinj.uri.BitcoinURI;
 import org.bitcoinj.utils.MonetaryFormat;
 import org.bitcoinj.wallet.KeyChain.KeyPurpose;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.spongycastle.crypto.params.KeyParameter;
+
+import com.google.common.base.Strings;
+import com.netki.WalletNameResolver;
+import com.netki.dns.DNSBootstrapService;
+import com.netki.dnssec.DNSSECResolver;
+import com.netki.tlsa.CACertService;
+import com.netki.tlsa.CertChainValidator;
+import com.netki.tlsa.TLSAValidator;
 
 import android.app.Activity;
 import android.app.Fragment;
@@ -195,10 +203,7 @@ public final class SendCoinsFragment extends Fragment
 		public void onFocusChange(final View v, final boolean hasFocus)
 		{
 			if (!hasFocus)
-			{
 				validateReceivingAddress();
-				updateView();
-			}
 		}
 
 		@Override
@@ -206,8 +211,6 @@ public final class SendCoinsFragment extends Fragment
 		{
 			if (s.length() > 0)
 				validateReceivingAddress();
-			else
-				updateView();
 		}
 
 		@Override
@@ -808,19 +811,73 @@ public final class SendCoinsFragment extends Fragment
 
 	private void validateReceivingAddress()
 	{
-		try
+		final String addressStr = receivingAddressView.getText().toString().trim();
+		if (!addressStr.isEmpty())
 		{
-			final String addressStr = receivingAddressView.getText().toString().trim();
-			if (!addressStr.isEmpty() && Constants.NETWORK_PARAMETERS.equals(Address.getParametersFromAddress(addressStr)))
+			backgroundHandler.post(new Runnable()
 			{
-				final String label = AddressBookProvider.resolveLabel(activity, addressStr);
-				validatedAddress = new AddressAndLabel(Constants.NETWORK_PARAMETERS, addressStr, label);
-				receivingAddressView.setText(null);
-			}
-		}
-		catch (final AddressFormatException x)
-		{
-			// swallow
+				@Override
+				public void run()
+				{
+					try
+					{
+						final AddressAndLabel validatedAddress;
+						if (addressStr.indexOf('.') >= 0)
+						{
+							final WalletNameResolver resolver = new WalletNameResolver(new DNSSECResolver(new DNSBootstrapService()),
+									new TLSAValidator(new DNSSECResolver(new DNSBootstrapService()), CACertService.getInstance(),
+											new CertChainValidator()));
+							final BitcoinURI resolvedUri = resolver.resolve(addressStr, Constants.WALLET_NAME_CURRENCY_CODE, true);
+							if (resolvedUri != null)
+							{
+								final Address resolvedAddress = resolvedUri.getAddress();
+								if (resolvedAddress != null && resolvedAddress.getParameters().equals(Constants.NETWORK_PARAMETERS))
+								{
+									final String resolvedLabel = Strings.emptyToNull(resolvedUri.getLabel());
+									validatedAddress = new AddressAndLabel(resolvedUri.getAddress(),
+											resolvedLabel != null ? resolvedLabel : addressStr);
+								}
+								else
+								{
+									validatedAddress = null;
+								}
+							}
+							else
+							{
+								validatedAddress = null;
+							}
+						}
+						else if (Constants.NETWORK_PARAMETERS.equals(Address.getParametersFromAddress(addressStr)))
+						{
+							final String label = AddressBookProvider.resolveLabel(activity, addressStr);
+							validatedAddress = new AddressAndLabel(Constants.NETWORK_PARAMETERS, addressStr, label);
+						}
+						else
+						{
+							validatedAddress = null;
+						}
+
+						if (validatedAddress != null)
+						{
+							activity.runOnUiThread(new Runnable()
+							{
+								@Override
+								public void run()
+								{
+									SendCoinsFragment.this.validatedAddress = validatedAddress;
+									receivingAddressView.setText(null);
+									updateView();
+								}
+							});
+						}
+					}
+					catch (final Exception x)
+					{
+						// TODO
+						x.printStackTrace();
+					}
+				}
+			});
 		}
 	}
 
